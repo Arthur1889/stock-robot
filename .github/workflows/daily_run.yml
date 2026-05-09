@@ -1,0 +1,28 @@
+name: Daily Stock Robot
+
+on:
+  schedule:
+    # 每天北京时间 16:00 运行 (对应 UTC 时间 08:00)
+    - cron: '0 8 * * 1-5'
+  workflow_dispatch: # 允许手动点按钮测试运行
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 安装依赖包
+        run: pip install -r requirements.txt
+
+      - name: 执行推送脚本
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python main.py
