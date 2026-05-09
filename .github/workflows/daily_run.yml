@@ -2,8 +2,8 @@ name: Daily Stock Robot
 
 on:
   schedule:
-    # 每天北京时间 16:00 运行 (对应 UTC 时间 08:00)
-    - cron: '0 8 * * 1-5'
+    # 每天北京时间 16:30 (UTC 08:30)
+    - cron: '30 8 * * 1-5'
   workflow_dispatch: # 允许手动点按钮测试运行
 
 jobs:
