@@ -1,73 +1,71 @@
 import requests
 import os
 import pandas as pd
-import time
+import akshare as ak
 
 # 从 Secrets 中读取凭据
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 
 def push_to_telegram(content):
-    """发送消息到 Telegram"""
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": content,
-        "parse_mode": "HTML"
-    }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"发送失败: {e}")
+    payload = {"chat_id": TG_CHAT_ID, "text": content, "parse_mode": "HTML"}
+    requests.post(url, json=payload, timeout=10)
 
-def get_index_valuation():
+def get_market_position():
     """
-    使用更稳定的备用数据源
-    这里我们改用一个相对稳定的公开数据接口，或者直接抓取基础行情进行模拟估算
+    通过计算当前价格在过去一年（250个交易日）的高低位置来判断水位
+    这种方法不依赖专门的估值接口，非常稳健
     """
-    import akshare as ak
-    
-    # 关注的核心指数
+    # 目标指数：上证指数, 沪深300, 创业板指, 中证500
     targets = {
-        "沪深300": "000300",
-        "中证500": "000905",
-        "创业板指": "399006",
-        "上证50": "000016"
+        "上证指数": "sh000001",
+        "沪深300": "sh000300",
+        "创业板指": "sz399006",
+        "中证500": "sh000905"
     }
     
     results = []
-    
-    # 获取最新的指数估值数据表 (这个接口目前在 akshare v1.13.x+ 是稳定的)
-    try:
-        # index_value_name_funddb 是目前获取全表最全的接口
-        df_all = ak.index_value_name_funddb()
-        
-        for name, code in targets.items():
-            # 在全表中匹配对应的行
-            row = df_all[df_all['指数名称'] == name]
-            if not row.empty:
-                item = row.iloc[0]
-                pe = item['市盈率']
-                pe_pct = item['市盈率百分位']
-                status = item['适宜性']
-                
-                icon = "✅" if float(pe_pct) < 20 else "⚠️" if float(pe_pct) > 80 else "🔹"
-                results.append(f"<b>{name}</b>\n当前PE：<code>{pe}</code>\n历史分位：<code>{pe_pct}%</code> {icon}\n状态：{status}\n")
-    except Exception as e:
-        return f"数据接口解析失败: {e}"
-
-    return "\n".join(results) if results else "未能抓取到匹配的指数数据"
+    for name, code in targets.items():
+        try:
+            # 获取历史行情数据 (这是 akshare 最核心、最不可能挂的接口)
+            df = ak.stock_zh_index_daily(symbol=code)
+            
+            # 取最近一年的数据 (约250个交易日)
+            recent_df = df.tail(250)
+            current_price = recent_df['close'].iloc[-1]
+            min_price = recent_df['close'].min()
+            max_price = recent_df['close'].max()
+            
+            # 计算当前价格在一年内的位置百分比 (0%表示一年最低，100%表示一年最高)
+            position_pct = round((current_price - min_price) / (max_price - min_price) * 100, 2)
+            
+            icon = "✅" if position_pct < 20 else "⚠️" if position_pct > 80 else "🔹"
+            results.append(
+                f"<b>{name}</b>\n"
+                f"当前点位：<code>{round(current_price, 2)}</code>\n"
+                f"一年内分位：<code>{position_pct}%</code> {icon}\n"
+            )
+        except Exception as e:
+            print(f"{name} 抓取失败: {e}")
+            
+    return "\n".join(results)
 
 def main():
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("错误: 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID")
         return
 
-    msg_body = get_index_valuation()
+    content = get_market_position()
     
-    final_msg = f"<b>📊 A股指数估值日报</b>\n\n{msg_body}\n<i>数据来源: 韭圈儿/FundDB</i>"
-    
-    push_to_telegram(final_msg)
+    if content:
+        final_msg = (
+            f"<b>📊 A股指数强弱日报 (一年视角)</b>\n\n"
+            f"{content}\n"
+            f"<i>注：百分位越低表示离一年内底部越近。</i>"
+        )
+        push_to_telegram(final_msg)
+    else:
+        push_to_telegram("今日数据抓取异常，请检查接口。")
 
 if __name__ == "__main__":
     main()
