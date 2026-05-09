@@ -2,8 +2,9 @@ name: Daily Stock Robot
 
 on:
   schedule:
-    # 每天北京时间 16:30 (UTC 08:30)
-    - cron: '30 8 * * 1-5'
+    # 每天北京时间 08:00 运行 (UTC 00:00)
+    # 虽然脚本里会判断节假日，但 cron 建议保留 1-5 以节省 GitHub 资源
+    - cron: '0 0 * * 1-5'
   workflow_dispatch: # 允许手动点按钮测试运行
 
 jobs:
