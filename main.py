@@ -1,72 +1,73 @@
 import requests
 import os
-import akshare as ak
 import pandas as pd
+import time
 
 # 从 Secrets 中读取凭据
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 
-def get_valuation_data():
-    """获取指数估值数据 - 使用最新备用接口"""
-    try:
-        # 尝试获取主流指数估值（改用最新的指数 PE/PB 列表接口）
-        # 这里抓取的是全量数据，我们随后进行筛选
-        df = ak.index_value_name_funddb() 
-        return df
-    except Exception:
-        try:
-            # 如果上面接口失效，尝试备用接口 (针对沪深300等)
-            print("尝试备用接口...")
-            df = ak.index_baidue_value_baidu() # 百度股市通接口
-            return df
-        except Exception as e:
-            print(f"所有数据抓取接口均失败: {e}")
-            return None
-
 def push_to_telegram(content):
-    """通过 Telegram Bot 发送消息"""
+    """发送消息到 Telegram"""
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,
         "text": content,
         "parse_mode": "HTML"
     }
-    res = requests.post(url, json=payload)
-    print(f"TG 返回结果: {res.text}")
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"发送失败: {e}")
 
-def main():
-    # 注意：由于 akshare 接口不稳定，我们这里直接抓取几个代表性宽基
-    # 如果想更稳定，我们手动定义关注的几个核心指数
-    indices = {
-        "沪深300": "sz399300",
-        "中证500": "sh000905",
-        "创业板指": "sz399006",
-        "上证50": "sh000016"
+def get_index_valuation():
+    """
+    使用更稳定的备用数据源
+    这里我们改用一个相对稳定的公开数据接口，或者直接抓取基础行情进行模拟估算
+    """
+    import akshare as ak
+    
+    # 关注的核心指数
+    targets = {
+        "沪深300": "000300",
+        "中证500": "000905",
+        "创业板指": "399006",
+        "上证50": "000016"
     }
     
-    msg = "<b>📊 A股指数估值日报</b>\n\n"
+    results = []
     
+    # 获取最新的指数估值数据表 (这个接口目前在 akshare v1.13.x+ 是稳定的)
     try:
-        for name, code in indices.items():
-            # 获取单个指数的历史估值
-            df = ak.index_value_hist_funddb(symbol=name, indicator="市盈率")
-            if not df.empty:
-                current_pe = df['市盈率'].iloc[-1]
-                # 计算分位数 (简单逻辑：当前值在历史序列中的排名)
-                pe_list = df['市盈率'].tolist()
-                pe_pct = round(sum(1 for x in pe_list if x < current_pe) / len(pe_list) * 100, 2)
-                
-                icon = "✅" if pe_pct < 20 else "⚠️" if pe_pct > 80 else "🔹"
-                msg += f"<b>{name}</b>\n"
-                msg += f"当前PE：<code>{current_pe}</code>\n"
-                msg += f"历史分位：<code>{pe_pct}%</code> {icon}\n\n"
+        # index_value_name_funddb 是目前获取全表最全的接口
+        df_all = ak.index_value_name_funddb()
         
-        msg += "<i>数据更新于: 2026年</i>"
-        push_to_telegram(msg)
-        print("发送完毕")
+        for name, code in targets.items():
+            # 在全表中匹配对应的行
+            row = df_all[df_all['指数名称'] == name]
+            if not row.empty:
+                item = row.iloc[0]
+                pe = item['市盈率']
+                pe_pct = item['市盈率百分位']
+                status = item['适宜性']
+                
+                icon = "✅" if float(pe_pct) < 20 else "⚠️" if float(pe_pct) > 80 else "🔹"
+                results.append(f"<b>{name}</b>\n当前PE：<code>{pe}</code>\n历史分位：<code>{pe_pct}%</code> {icon}\n状态：{status}\n")
     except Exception as e:
-        push_to_telegram(f"脚本运行出错: {str(e)}")
+        return f"数据接口解析失败: {e}"
+
+    return "\n".join(results) if results else "未能抓取到匹配的指数数据"
+
+def main():
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        print("错误: 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID")
+        return
+
+    msg_body = get_index_valuation()
+    
+    final_msg = f"<b>📊 A股指数估值日报</b>\n\n{msg_body}\n<i>数据来源: 韭圈儿/FundDB</i>"
+    
+    push_to_telegram(final_msg)
 
 if __name__ == "__main__":
     main()
