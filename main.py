@@ -153,21 +153,70 @@ def is_c_class(name):
     n = name.strip()
     return bool(re.search(r'[Cc](?:类|人民币|\(人民币\)|\(美元\)|份额|$)', n))
 
-def clean_fund_name(name):
-    """精简基金名称以提升手机阅读体验"""
-    n = name
-    for s in ['交易型开放式指数证券投资基金', '发起式证券投资基金', '证券投资基金', '发起式联接', '发起式', '指数型']:
-        n = n.replace(s, '')
-    n = re.sub(r'\(QDII(?:-LOF)?\)', '', n)
-    n = re.sub(r'（QDII(?:-LOF)?）', '', n)
-    n = n.replace('人民币', '').strip()
-    return n
+FIRM_MAP = {
+    '大成': '大成', '华夏': '华夏', '博时': '博时', '南方': '南方',
+    '嘉实': '嘉实', '天弘': '天弘', '汇添富': '汇添富', '摩根': '摩根',
+    '万家': '万家', '华泰柏瑞': '华泰', '招商': '招商', '宝盈': '宝盈',
+    '华安': '华安', '国泰': '国泰', '易方达': '易方达', '广发': '广发',
+    '建信': '建信', '富国': '富国', '景顺': '景顺'
+}
 
-def short_fund_name(name):
-    """超简简称 (专用于手机端紧凑表格)"""
-    n = clean_fund_name(name)
-    n = n.replace('纳斯达克100', '纳指').replace('纳斯达克', '纳指')
-    return n[:9]
+def clean_fund_name(raw_name):
+    """
+    规范化纳指基金简称：统一为 {公司}纳指100{份额类别}
+    去除冗余的'ETF联接'、'指数证券投资基金'、'发起式'等修饰词，保证整齐直观
+    """
+    firm = None
+    for k in sorted(FIRM_MAP.keys(), key=lambda x: -len(x)):
+        if k in raw_name:
+            firm = FIRM_MAP[k]
+            break
+    if not firm:
+        firm = raw_name[:2]
+    
+    m = re.search(r'([A-Za-z])(?:类|人民币|\(人民币\)|\(美元\)|份额|$)', raw_name)
+    share_class = m.group(1).upper() if m else 'A'
+    return f'{firm}纳指100{share_class}'
+
+def display_width(s):
+    """计算包含中英文字符的终端/等宽字体显示宽度 (全角汉字算2，半角字符算1)"""
+    w = 0
+    for ch in s:
+        if '\u4e00' <= ch <= '\u9fff' or '\uff01' <= ch <= '\uffee':
+            w += 2
+        else:
+            w += 1
+    return w
+
+def pad_to(s, target_w):
+    """按显示宽度向右填充半角空格，确保在等宽字体下精准对齐"""
+    w = display_width(s)
+    if w >= target_w:
+        return s
+    return s + ' ' * (target_w - w)
+
+def format_limit_cell(desc):
+    """
+    将限购描述转换为固定宽度单元格，右对齐数值/状态
+    例如: '100元' -> '  100元', '10元' -> '   10元', '5元' -> '    5元', '暂停' -> '   暂停'
+    在等宽显示下严格占据 7 个半角字符宽度，保证列绝对垂直对齐
+    """
+    if not desc or '暂停' in desc:
+        return '   暂停'
+    if '开放' in desc:
+        return '   开放'
+    if '大额' in desc:
+        return '   大额'
+    m = re.search(r'(\d+)', desc)
+    if m:
+        val = int(m.group(1))
+        if val >= 10000:
+            s_val = f'{val//10000}万'
+            return f'   {s_val:>2}元'
+        num_str = str(val)
+        spaces = ' ' * (5 - len(num_str))
+        return f'{spaces}{num_str}元'
+    return '   限购'
 
 def is_purchase_notice(title):
     """过滤筛选申购限制、暂停与恢复相关的有效业务公告"""
@@ -355,7 +404,6 @@ def fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json'):
             'code': code,
             'name': name,
             'clean_name': clean_fund_name(name),
-            'short_name': short_fund_name(name),
             'agency': agency_desc,
             'agency_amt': agency_amt,
             'direct': direct_desc,
@@ -469,17 +517,18 @@ def build_qdii_report(results, cache_file='qdii_cache.json'):
     # 【然后列表展示 - 方便手机阅读的表格与Markdown卡片】
     msg += "<b>📋 【基金限购与费率列表】</b>\n\n"
     
-    # 1. 可申购基金紧凑表格 (手机单屏直观查阅)
+    # 1. 可申购基金紧凑表格 (针对 iPhone 13pm 等手机端屏幕优化，严格定宽对齐且绝不折行)
     msg += "<b>🟢 可申购 / 限额申购基金速览表：</b>\n"
     msg += "<pre>\n"
-    msg += "代码   简称      代销    直销   运营费\n"
-    msg += "--------------------------------------\n"
+    msg += "代码   基金简称       代销    直销   运营费\n"
+    msg += "----------------------------------------\n"
     for r in purchasable:
-        a_short = r['agency'].replace('限额', '限').replace('/天', '').replace('暂停申购', '暂停')
-        d_short = r['direct'].replace('限额', '限').replace('/天', '').replace('暂停申购', '暂停')
+        p_name = pad_to(r['clean_name'], 14)
+        a_cell = format_limit_cell(r['agency'])
+        d_cell = format_limit_cell(r['direct'])
         op = r['op_fee'].replace('/年', '')
-        msg += f"{r['code']} {r['short_name']:<8} {a_short:<6} {d_short:<6} {op}\n"
-    msg += "</pre>\n"
+        msg += f"{r['code']} {p_name} {a_cell} {d_cell}  {op}\n"
+    msg += "</pre>\n\n"
 
     # 2. 可申购基金逐只详细卡片 (突出直销/代销额度与费率)
     msg += "<b>🔍 可申购基金明细（含申购费与运营明细）：</b>\n"
@@ -491,14 +540,15 @@ def build_qdii_report(results, cache_file='qdii_cache.json'):
     # 3. 暂停申购基金表格清单
     msg += f"\n<b>🔴 暂停申购基金清单 (共 {len(suspended)} 只)：</b>\n"
     msg += "<pre>\n"
-    msg += "代码   简称          代销/直销  运营费\n"
-    msg += "--------------------------------------\n"
+    msg += "代码   基金简称       状态     运营费\n"
+    msg += "------------------------------------\n"
     for r in suspended:
+        p_name = pad_to(r['clean_name'], 14)
         op = r['op_fee'].replace('/年', '')
-        msg += f"{r['code']} {r['short_name']:<11} 暂停申购   {op}\n"
+        msg += f"{r['code']} {p_name} 暂停申购  {op}\n"
     msg += "</pre>\n"
 
-    msg += "\n<i>注：申购费通常可享代销平台1折优惠(约0.10%-0.12%)。直销限额以基金官方APP为准，代销以天天基金/蚂蚁为准。</i>"
+    msg += "\n<i>💡 份额说明：A类为常规前端收费(免销售服务费)；I类为机构/互联网专属低费率份额(0申购费+极低销售服务费)；D类为电子直销定制份额(0申购费+计提销售服务费)。\n注：申购费通常可享代销平台1折优惠(约0.10%-0.12%)。直销限额以基金官方APP为准，代销以天天基金/蚂蚁为准。</i>"
     return msg
 
 # ==================== Telegram 发送辅助 ====================
