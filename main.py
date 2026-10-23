@@ -18,6 +18,17 @@ def get_beijing_time():
     """获取当前北京时间 (UTC+8)"""
     return datetime.now(BEIJING_TZ)
 
+def is_trading_day(dt):
+    """
+    精确判断是否为 A股与国内公募基金 交易日：
+    1. 周末 (周六、周日) 股市一律不开市 (即使因法定节假日调休补班，股市也坚决休市)；
+    2. 法定节假日 (春节、国庆、五一、中秋、端午、清明、元旦) 股市一律休市。
+    """
+    d = dt.date() if isinstance(dt, datetime) else dt
+    if d.weekday() >= 5:
+        return False
+    return is_workday(d)
+
 # 从环境变量中读取凭据
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
@@ -608,7 +619,7 @@ def main():
     # 1. 交易日检查 (严格使用北京时间，支持通过 FORCE_RUN 强制执行)
     today = get_beijing_time()
     force_run = os.environ.get('FORCE_RUN', '').lower() in ['true', '1', 'yes']
-    if not force_run and not is_workday(today):
+    if not force_run and not is_trading_day(today):
         print(f"今日 {today.strftime('%Y-%m-%d')} 为非交易日，脚本退出。")
         return
 
