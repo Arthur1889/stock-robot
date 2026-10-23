@@ -1,15 +1,28 @@
 name: Daily Stock Robot
 
 on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+      - 'qdii_cache.json'
   schedule:
     # 每天北京时间 08:00 运行 (UTC 00:00)
-    # 虽然脚本里会判断节假日，但 cron 建议保留 1-5 以节省 GitHub 资源
     - cron: '0 0 * * 1-5'
   workflow_dispatch: # 允许手动点按钮测试运行
+    inputs:
+      force_run:
+        description: '是否强制运行 (忽略交易日检查)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: 检出代码
         uses: actions/checkout@v3
@@ -26,4 +39,13 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          FORCE_RUN: ${{ inputs.force_run }}
         run: python main.py
+
+      - name: 提交并推送缓存更新
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add qdii_cache.json
+          git diff --staged --quiet || (git commit -m "Auto-update QDII cache [skip ci]" && git push)
+        continue-on-error: true

@@ -3,3 +3,5 @@ pandas
 akshare
 lxml
 chinesecalendar
+beautifulsoup4
+pypdf
