@@ -4,13 +4,19 @@ import re
 import json
 import io
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import concurrent.futures
 import bs4
 import pypdf
 import pandas as pd
 import akshare as ak
 from chinese_calendar import is_workday
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+def get_beijing_time():
+    """获取当前北京时间 (UTC+8)"""
+    return datetime.now(BEIJING_TZ)
 
 # 从环境变量中读取凭据
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN')
@@ -132,7 +138,8 @@ def generate_valuation_report(today):
     all_items = broad_items + industry_items
     daily_summary = create_valuation_summary(all_items)
 
-    msg = f"<b>📅 韭圈儿指数估值日报 ({today.strftime('%m/%d')})</b>\n"
+    session_tag = "早报" if today.hour < 12 else "收盘"
+    msg = f"<b>📅 韭圈儿指数估值日报 ({today.strftime('%m/%d')} {session_tag})</b>\n"
     msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
     
     if daily_summary:
@@ -394,7 +401,7 @@ def fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json'):
 
         # 记录最近3日内新发布的公告
         recent_notices = []
-        three_days_ago = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+        three_days_ago = (get_beijing_time() - timedelta(days=3)).strftime('%Y-%m-%d')
         for n in notices:
             p_date = n.get('PUBLISHDATEDesc', '')
             if p_date >= three_days_ago:
@@ -419,9 +426,12 @@ def fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json'):
 
     return results
 
-def build_qdii_report(results, cache_file='qdii_cache.json'):
+def build_qdii_report(results, today=None, cache_file='qdii_cache.json'):
     """生成汇报消息：先说整体，说今天的变化情况，然后以适合手机阅读的表格与Markdown格式列表展示"""
-    today_str = datetime.now().strftime('%m/%d')
+    if today is None:
+        today = get_beijing_time()
+    session_tag = "早报" if today.hour < 12 else "收盘"
+    today_str = f"{today.strftime('%m/%d')} {session_tag}"
     total_count = len(results)
 
     # 1. 分类：可申购基金 vs 暂停申购基金
@@ -595,8 +605,8 @@ def send_telegram_message(text):
 # ==================== 主入口 ====================
 
 def main():
-    # 1. 交易日检查 (支持通过 FORCE_RUN 强制执行，方便调试)
-    today = datetime.now()
+    # 1. 交易日检查 (严格使用北京时间，支持通过 FORCE_RUN 强制执行)
+    today = get_beijing_time()
     force_run = os.environ.get('FORCE_RUN', '').lower() in ['true', '1', 'yes']
     if not force_run and not is_workday(today):
         print(f"今日 {today.strftime('%Y-%m-%d')} 为非交易日，脚本退出。")
@@ -615,7 +625,7 @@ def main():
     print("\n=== 开始生成纳斯达克100 QDII 场外基金日报 ===")
     try:
         qdii_funds = fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json')
-        qdii_report = build_qdii_report(qdii_funds, cache_file='qdii_cache.json')
+        qdii_report = build_qdii_report(qdii_funds, today, cache_file='qdii_cache.json')
         print("正在推送纳斯达克100 QDII 日报至 Telegram (单独发送)...")
         send_telegram_message(qdii_report)
         print("=== 所有任务执行完毕 ===")

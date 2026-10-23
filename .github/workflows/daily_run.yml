@@ -8,8 +8,10 @@ on:
       - '.gitignore'
       - 'qdii_cache.json'
   schedule:
-    # 每天北京时间 08:00 运行 (UTC 00:00)
-    - cron: '0 0 * * 1-5'
+    # 每天北京时间 07:45 晨报 (UTC 23:45，周日至周四)
+    - cron: '45 23 * * 0-4'
+    # 每天北京时间 15:15 盘后 (UTC 07:15，周一至周五)
+    - cron: '15 7 * * 1-5'
   workflow_dispatch: # 允许手动点按钮测试运行
     inputs:
       force_run:
@@ -21,6 +23,8 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    env:
+      TZ: 'Asia/Shanghai'
     permissions:
       contents: write
     steps:
