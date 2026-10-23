@@ -38,25 +38,63 @@ def get_valuation_status(pos):
     else:
         return "🟡 估值适中 (正常持有)"
 
-def fetch_index_data(targets):
-    results = []
-    for name, code in targets.items():
-        try:
-            # 抓取行情数据
+def fetch_single_index(name, code):
+    """抓取单只指数行情数据并计算3年历史分位"""
+    try:
+        if code == 'HSTECH':
+            df = ak.stock_hk_index_daily_sina(symbol='HSTECH')
+        else:
             df = ak.stock_zh_index_daily(symbol=code)
-            current_price = df['close'].iloc[-1]
-            # 韭圈儿通常参考3年(750天)周期
-            df_3y = df.tail(750)
-            p_min, p_max = df_3y['close'].min(), df_3y['close'].max()
-            pos = (current_price - p_min) / (p_max - p_min) * 100
-            
-            bar = create_bar(pos)
-            status = get_valuation_status(pos)
-            
-            results.append(f"<b>{name}</b>\n<code>{bar}</code> {round(pos, 1)}%\n状态：{status}\n")
-        except:
-            continue
-    return "\n".join(results)
+        
+        current_price = df['close'].iloc[-1]
+        df_3y = df.tail(750)
+        p_min, p_max = df_3y['close'].min(), df_3y['close'].max()
+        pos = (current_price - p_min) / (p_max - p_min) * 100
+        clean_name = re.sub(r'\s*\(.*?\)', '', name).strip()
+        
+        return {
+            'name': name,
+            'clean_name': clean_name,
+            'code': code,
+            'pos': round(pos, 1),
+            'price': current_price,
+            'bar': create_bar(pos),
+            'status': get_valuation_status(pos)
+        }
+    except Exception as e:
+        return None
+
+def create_valuation_summary(items):
+    """根据核心指数估值分位自动生成每日总结"""
+    if not items:
+        return ""
+    
+    low_items = [x for x in items if x['pos'] < 20]
+    mid_items = [x for x in items if 20 <= x['pos'] <= 80]
+    high_items = [x for x in items if x['pos'] > 80]
+    
+    avg_pos = sum(x['pos'] for x in items) / len(items)
+    min_item = min(items, key=lambda x: x['pos'])
+    max_item = max(items, key=lambda x: x['pos'])
+    
+    # 市场温度与情绪研判
+    if avg_pos < 30:
+        temp_status = "🟢 整体处于历史偏低估值区间，中长期配置性价比突出"
+        advice = "多数核心资产位于价值洼地，建议保持积极心态，逢低分批定投布局。"
+    elif avg_pos > 70:
+        temp_status = "🔴 整体估值处于偏高水位，需警惕短期高位震荡风险"
+        advice = "部分板块估值较为亢奋，建议以稳健持仓为主，注意控制仓位防守。"
+    else:
+        temp_status = "🟡 整体估值处于合理适中区间，结构性分化较为明显"
+        advice = "宽基与行业分化并存，建议采取哑铃策略，侧重低估宽基与高景气龙头均衡配置。"
+
+    summary = "<b>📝 【今日估值每日总结】</b>\n"
+    summary += f"• <b>大盘温度</b>：{temp_status}（核心指数平均估值分位 <b>{avg_pos:.1f}%</b>）。\n"
+    summary += f"• <b>格局分布</b>：监控的 {len(items)} 个核心板块中，<b>{len(low_items)}</b> 个低估、<b>{len(mid_items)}</b> 个适中、<b>{len(high_items)}</b> 个高估。\n"
+    summary += f"• <b>估值洼地</b>：<b>{min_item['clean_name']}</b> 分位仅 <code>{min_item['pos']:.1f}%</code>，处低位布局舒适区。\n"
+    summary += f"• <b>估值高位</b>：<b>{max_item['clean_name']}</b> 分位达 <code>{max_item['pos']:.1f}%</code>，注意高位波动与回调风险。\n"
+    summary += f"• <b>投资策略</b>：{advice}\n"
+    return summary
 
 def generate_valuation_report(today):
     broad_indices = {
@@ -69,31 +107,67 @@ def generate_valuation_report(today):
     industry_indices = {
         "中证白酒 (消费核心)": "sz399997",
         "半导体指 (硬科技)": "sz399812",
-        "恒生科技 (港股互联)": "sh000501"
+        "恒生科技 (港股互联)": "HSTECH"
     }
 
+    # 抓取宽基指数
+    broad_results = []
+    broad_items = []
+    for name, code in broad_indices.items():
+        item = fetch_single_index(name, code)
+        if item:
+            broad_items.append(item)
+            broad_results.append(f"<b>{item['name']}</b>\n<code>{item['bar']}</code> {item['pos']}%\n状态：{item['status']}\n")
+
+    # 抓取行业指数
+    industry_results = []
+    industry_items = []
+    for name, code in industry_indices.items():
+        item = fetch_single_index(name, code)
+        if item:
+            industry_items.append(item)
+            industry_results.append(f"<b>{item['name']}</b>\n<code>{item['bar']}</code> {item['pos']}%\n状态：{item['status']}\n")
+
+    # 生成开头的每日总结
+    all_items = broad_items + industry_items
+    daily_summary = create_valuation_summary(all_items)
+
     msg = f"<b>📅 韭圈儿指数估值日报 ({today.strftime('%m/%d')})</b>\n"
-    msg += "━━━━━━━━━━━━━━━\n\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
     
-    msg += "<b>【宽基指数】</b>\n" + fetch_index_data(broad_indices)
-    msg += "\n<b>【重点行业】</b>\n" + fetch_index_data(industry_indices)
+    if daily_summary:
+        msg += daily_summary + "\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    msg += "<b>【宽基指数】</b>\n" + "\n".join(broad_results)
+    msg += "\n<b>【重点行业】</b>\n" + "\n".join(industry_results)
     
     msg += "\n<b>🔗 数据详查</b>\n"
     msg += "👉 <a href='https://mp.weixin.qq.com/s/p0eMEsEuUkl57A2ali-dNg'>点击进入【韭圈儿】官网日报</a>\n"
-    
     msg += "\n<i>注：分位基于过去3年历史点位计算。</i>"
     return msg
 
 # ==================== 新增功能：纳斯达克100 QDII 场外指数基金监控 ====================
 
+def is_c_class(name):
+    """判断是否为 C 类基金份额 (需排除)"""
+    n = name.strip()
+    return bool(re.search(r'[Cc](?:类|人民币|\(人民币\)|\(美元\)|份额|$)', n))
+
 def clean_fund_name(name):
-    """精简基金名称以提升可读性"""
+    """精简基金名称以提升手机阅读体验"""
     n = name
     for s in ['交易型开放式指数证券投资基金', '发起式证券投资基金', '证券投资基金', '发起式联接', '发起式', '指数型']:
         n = n.replace(s, '')
     n = re.sub(r'\(QDII(?:-LOF)?\)', '', n)
     n = re.sub(r'（QDII(?:-LOF)?）', '', n)
-    return n.strip()
+    n = n.replace('人民币', '').strip()
+    return n
+
+def short_fund_name(name):
+    """超简简称 (专用于手机端紧凑表格)"""
+    n = clean_fund_name(name)
+    n = n.replace('纳斯达克100', '纳指').replace('纳斯达克', '纳指')
+    return n[:9]
 
 def is_purchase_notice(title):
     """过滤筛选申购限制、暂停与恢复相关的有效业务公告"""
@@ -192,7 +266,7 @@ def fetch_fund_fees(code, cached_fees=None):
     return '-', '-', '-', '-'
 
 def fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json'):
-    """抓取全市场纳斯达克100场外QDII基金信息"""
+    """抓取全市场纳斯达克100场外QDII基金信息（排除C类基金）"""
     print("正在拉取纳斯达克100 QDII场外基金目录...")
     r = requests.get('https://fund.eastmoney.com/js/fundcode_search.js', headers=HEADERS, timeout=10)
     match = re.search(r'\[.*\]', r.text)
@@ -201,7 +275,10 @@ def fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json'):
     # 排除纯场内ETF（保留联接基金及场外普通指数基金）
     otc = [f for f in nasdaq if not (f[0].startswith(('15', '51')) and '联接' not in f[2])]
     cny_funds = [f for f in otc if not any(c in f[2] for c in ['美元', '美钞', '美汇'])]
-    print(f"筛选得到纳斯达克100场外人民币份额基金共 {len(cny_funds)} 只")
+    
+    # 核心要求 1：排除掉 C 类基金
+    target_funds = [f for f in cny_funds if not is_c_class(f[2])]
+    print(f"筛选得到纳斯达克100场外基金共 {len(target_funds)} 只 (已排除所有C类份额)")
 
     # 读取旧缓存用于重试保底
     old_cache = {}
@@ -215,7 +292,7 @@ def fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json'):
     print("正在获取天天基金实时代销申购状态与费率...")
     df_pur = ak.fund_purchase_em()
     pur_map = {}
-    for _, row in df_pur[df_pur['基金代码'].isin([f[0] for f in cny_funds])].iterrows():
+    for _, row in df_pur[df_pur['基金代码'].isin([f[0] for f in target_funds])].iterrows():
         pur_map[row['基金代码']] = {
             'status': row['申购状态'],
             'limit': row['日累计限定金额'],
@@ -278,6 +355,7 @@ def fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json'):
             'code': code,
             'name': name,
             'clean_name': clean_fund_name(name),
+            'short_name': short_fund_name(name),
             'agency': agency_desc,
             'agency_amt': agency_amt,
             'direct': direct_desc,
@@ -289,12 +367,12 @@ def fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json'):
         }
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-        results = list(ex.map(process_fund, cny_funds))
+        results = list(ex.map(process_fund, target_funds))
 
     return results
 
 def build_qdii_report(results, cache_file='qdii_cache.json'):
-    """生成汇报消息：先说整体，说今天的变化情况，然后列表展示"""
+    """生成汇报消息：先说整体，说今天的变化情况，然后以适合手机阅读的表格与Markdown格式列表展示"""
     today_str = datetime.now().strftime('%m/%d')
     total_count = len(results)
 
@@ -361,26 +439,26 @@ def build_qdii_report(results, cache_file='qdii_cache.json'):
     except:
         pass
 
-    # 3. 组装消息
+    # 3. 组装消息 (按整体 -> 今日变化 -> 列表展示)
     msg = f"<b>🇺🇸 纳斯达克100 QDII 场外指数基金日报 ({today_str})</b>\n"
     msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-    # 【整体概况】
+    # 【先说整体】
     msg += "<b>📊 【整体概况】</b>\n"
-    msg += f"• 纳入监控：共 <b>{total_count}</b> 只场外人民币份额基金\n"
-    msg += f"• 申购状态：<b>{len(purchasable)}</b> 只可申购(大多限额)，<b>{len(suspended)}</b> 只暂停申购\n"
+    msg += f"• <b>监控范围</b>：共 <b>{total_count}</b> 只场外基金（已剔除所有C类份额）\n"
+    msg += f"• <b>申购状态</b>：<b>{len(purchasable)}</b> 只可申购(大多大额限购)，<b>{len(suspended)}</b> 只暂停申购\n"
     if purchasable:
         max_d = max(r['direct_amt'] for r in purchasable)
         max_a = max(r['agency_amt'] for r in purchasable)
-        msg += f"• 额度极值：代销单日最高 <b>{int(max_a)}元/天</b>，直销单日最高 <b>{int(max_d)}元/天</b>\n"
-    msg += "• 额度研判：QDII外汇额度整体依然极度紧俏，仅少数基金公司留有少量每日小额申购限额。\n\n"
+        msg += f"• <b>额度极值</b>：代销单日最高 <b>{int(max_a)}元/天</b>，直销单日最高 <b>{int(max_d)}元/天</b>\n"
+    msg += "• <b>额度现状</b>：QDII外汇额度整体依然极度紧俏，仅少数基金公司留有少量每日小额申购限额。\n\n"
 
-    # 【今日变化情况】
+    # 【说今天的变化情况】
     msg += "<b>⚡ 【今日变化情况】</b>\n"
     if changes:
         msg += "\n".join(changes[:8]) + "\n"
     elif not old_cache:
-        msg += "• ℹ️ 首次建立监控基准快照，明日起将实时对比并汇报额度变动。\n"
+        msg += "• ℹ️ 首次建立非C类基准快照，明日起将实时对比并汇报额度变动。\n"
     else:
         msg += "• 今日申购状态及限额与昨日持平，暂无最新调整。\n"
 
@@ -388,19 +466,39 @@ def build_qdii_report(results, cache_file='qdii_cache.json'):
         msg += "<b>最新公告动态：</b>\n" + "\n".join(ann_highlights[:3]) + "\n"
     msg += "\n"
 
-    # 【列表展示】
+    # 【然后列表展示 - 方便手机阅读的表格与Markdown卡片】
     msg += "<b>📋 【基金限购与费率列表】</b>\n\n"
-    msg += "<b>🟢 可申购 / 限额申购基金（按最高限额排序）</b>\n"
+    
+    # 1. 可申购基金紧凑表格 (手机单屏直观查阅)
+    msg += "<b>🟢 可申购 / 限额申购基金速览表：</b>\n"
+    msg += "<pre>\n"
+    msg += "代码   简称      代销    直销   运营费\n"
+    msg += "--------------------------------------\n"
+    for r in purchasable:
+        a_short = r['agency'].replace('限额', '限').replace('/天', '').replace('暂停申购', '暂停')
+        d_short = r['direct'].replace('限额', '限').replace('/天', '').replace('暂停申购', '暂停')
+        op = r['op_fee'].replace('/年', '')
+        msg += f"{r['code']} {r['short_name']:<8} {a_short:<6} {d_short:<6} {op}\n"
+    msg += "</pre>\n"
+
+    # 2. 可申购基金逐只详细卡片 (突出直销/代销额度与费率)
+    msg += "<b>🔍 可申购基金明细（含申购费与运营明细）：</b>\n"
     for r in purchasable:
         msg += f"<b>• {r['clean_name']}</b> (<code>{r['code']}</code>)\n"
         msg += f"  ├ <b>限购</b>：代销 <code>{r['agency']}</code> ｜ 直销 <code>{r['direct']}</code>\n"
         msg += f"  └ <b>费用</b>：申购 <code>{r['buy_fee']}</code> ｜ 运营 <code>{r['op_fee']}</code> ({r['op_detail']})\n"
 
-    msg += f"\n<b>🔴 暂停申购基金 (共 {len(suspended)} 只)</b>\n"
+    # 3. 暂停申购基金表格清单
+    msg += f"\n<b>🔴 暂停申购基金清单 (共 {len(suspended)} 只)：</b>\n"
+    msg += "<pre>\n"
+    msg += "代码   简称          代销/直销  运营费\n"
+    msg += "--------------------------------------\n"
     for r in suspended:
-        msg += f"• <code>{r['code']}</code> {r['clean_name']} ｜ 代销:{r['agency']} 直销:{r['direct']} ｜ 申购:{r['buy_fee']} 运营:{r['op_fee']}\n"
+        op = r['op_fee'].replace('/年', '')
+        msg += f"{r['code']} {r['short_name']:<11} 暂停申购   {op}\n"
+    msg += "</pre>\n"
 
-    msg += "\n<i>注：运营费=管理费+托管费+销售服务费(C类)。直销限额以基金官方APP为准，代销以天天基金/蚂蚁为准。</i>"
+    msg += "\n<i>注：申购费通常可享代销平台1折优惠(约0.10%-0.12%)。直销限额以基金官方APP为准，代销以天天基金/蚂蚁为准。</i>"
     return msg
 
 # ==================== Telegram 发送辅助 ====================
@@ -454,7 +552,7 @@ def main():
         print(f"今日 {today.strftime('%Y-%m-%d')} 为非交易日，脚本退出。")
         return
 
-    # 2. 原有功能：生成并发送韭圈儿指数估值日报
+    # 2. 原有功能：生成并发送韭圈儿指数估值日报 (开头已增加每日总结)
     print("=== 开始生成韭圈儿指数估值日报 ===")
     try:
         valuation_msg = generate_valuation_report(today)
@@ -463,7 +561,7 @@ def main():
     except Exception as e:
         print(f"生成或发送韭圈儿指数估值日报失败: {e}")
 
-    # 3. 新增功能：单独发送纳斯达克100 QDII 场外基金监控日报
+    # 3. 新增功能：单独发送纳斯达克100 QDII 场外基金监控日报 (排除C类，表格化展示)
     print("\n=== 开始生成纳斯达克100 QDII 场外基金日报 ===")
     try:
         qdii_funds = fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json')
