@@ -7,12 +7,13 @@ on:
       - 'README.md'
       - '.gitignore'
       - 'qdii_cache.json'
-  schedule:
-    # 每天北京时间 07:45 晨报 (UTC 23:45，周日至周四)
-    - cron: '45 23 * * 0-4'
-    # 每天北京时间 15:15 盘后 (UTC 07:15，周一至周五)
-    - cron: '15 7 * * 1-5'
-  workflow_dispatch: # 允许手动点按钮测试运行
+  # 原自带 schedule 定时队列常有数小时严重延迟，现改由 Cloudflare Workers Cron 精准触发 workflow_dispatch
+  # schedule:
+  #   # 每天北京时间 07:45 晨报 (UTC 23:45，周日至周四)
+  #   - cron: '45 23 * * 0-4'
+  #   # 每天北京时间 15:15 盘后 (UTC 07:15，周一至周五)
+  #   - cron: '15 7 * * 1-5'
+  workflow_dispatch: # 允许通过 API (如 Cloudflare Worker) 或手动点按钮触发
     inputs:
       force_run:
         description: '是否强制运行 (忽略交易日检查)'

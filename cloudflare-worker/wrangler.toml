@@ -1,0 +1,14 @@
+name = "stock-robot-cron"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# 定时触发器 (UTC 时间)
+# 1. 每天北京时间 07:45 晨报 (UTC 23:45，周日至周四，对应北京时间周一至周五)
+# 2. 每天北京时间 15:15 盘后 (UTC 07:15，周一至周五)
+[triggers]
+crons = [
+  "45 23 * * 0-4",
+  "15 7 * * 1-5"
+]
+
+# 注意：GH_PAT 密钥请使用 wrangler secret put GH_PAT 或在 Cloudflare Dashboard 中配置，不要明文写在 toml 中。
