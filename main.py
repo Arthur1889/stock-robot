@@ -209,12 +209,13 @@ def display_width(s):
             w += 1
     return w
 
-def pad_to(s, target_w):
-    """按显示宽度向右填充半角空格，确保在等宽字体下精准对齐"""
+def pad_to(s, target_w, align='left'):
+    """按显示宽度填充半角空格，确保在等宽字体下精准对齐"""
     w = display_width(s)
     if w >= target_w:
         return s
-    return s + ' ' * (target_w - w)
+    pad = ' ' * (target_w - w)
+    return (s + pad) if align == 'left' else (pad + s)
 
 def format_limit_cell(desc):
     """
@@ -575,6 +576,286 @@ def build_qdii_report(results, today=None, cache_file='qdii_cache.json'):
     msg += "\n<i>💡 份额说明：A类为常规前端收费(免销售服务费)；I类为机构/互联网专属低费率份额(0申购费+极低销售服务费)；D类为电子直销定制份额(0申购费+计提销售服务费)。\n注：申购费通常可享代销平台1折优惠(约0.10%-0.12%)。直销限额以基金官方APP为准，代销以天天基金/蚂蚁为准。</i>"
     return msg
 
+# ==================== 新增功能 2：全球主要股指 & 纳指100/标普500 估值日报 ====================
+
+GLOBAL_INDICES_SPEC = [
+    # (显示简称, 行情源, 代码, 蛋卷估值代码, Yahoo参考ETF代码)
+    ('纳指100', 'us_sina', '.NDX', 'NDX', 'QQQ'),
+    ('标普500', 'us_sina', '.INX', 'SP500', 'SPY'),
+    ('道琼斯', 'us_sina', '.DJI', None, 'DIA'),
+    ('德国DAX', 'em_global', '德国DAX30', 'GDAXI', 'EWG'),
+    ('英国富时', 'em_global', '英国富时100', None, 'EWU'),
+    ('法国CAC', 'em_global', '法国CAC40', None, 'EWQ'),
+    ('欧洲50', 'em_global', '欧洲斯托克50', None, 'FEZ'),
+    ('日经225', 'em_global', '日经225', None, 'EWJ'),
+    ('印度孟买', 'em_global', '印度孟买SENSEX', '935600', 'INDA'),
+    ('韩国综合', 'em_global', '韩国KOSPI', None, 'EWY'),
+    ('恒生指数', 'em_global', '恒生指数', 'HKHSI', None),
+    ('沪深300', 'em_global', '沪深300', 'SH000300', None),
+]
+
+def fetch_danjuan_valuations():
+    """从蛋卷估值接口获取核心指数官方 PE/PB/分位/ROE/股息率 及 纳指100/标普500 PE参考线"""
+    dj_map = {}
+    pe_bands = {}
+    headers = {'User-Agent': HEADERS['User-Agent']}
+    try:
+        res = requests.get('https://danjuanfunds.com/djapi/index_eva/dj', headers=headers, timeout=10).json()
+        for it in res.get('data', {}).get('items', []):
+            dj_map[it.get('index_code')] = it
+    except Exception as e:
+        print(f"获取蛋卷全市场估值失败: {e}")
+
+    for code in ['NDX', 'SP500']:
+        try:
+            res = requests.get(f'https://danjuanfunds.com/djapi/index_eva/pe_history/{code}?day=all', headers=headers, timeout=10).json()
+            lines = {ln.get('line_name'): ln.get('line_value') for ln in res.get('data', {}).get('horizontal_lines', [])}
+            hist = res.get('data', {}).get('index_eva_pe_growths', [])
+            pe_vals = [h['pe'] for h in hist if h.get('pe')]
+            pe_bands[code] = {
+                'p30': lines.get('30分位值'),
+                'p50': lines.get('中位值'),
+                'p70': lines.get('70分位值'),
+                'min_10y': min(pe_vals) if pe_vals else None,
+                'max_10y': max(pe_vals) if pe_vals else None,
+            }
+        except Exception as e:
+            print(f"获取蛋卷 {code} PE历史参考线失败: {e}")
+
+    return dj_map, pe_bands
+
+def fetch_us_10y_yield():
+    """获取美国10年期国债收益率 (%) 作为无风险利率基准"""
+    try:
+        r = requests.get(
+            'https://query1.finance.yahoo.com/v8/finance/chart/%5ETNX?range=5d&interval=1d',
+            headers={'User-Agent': HEADERS['User-Agent']},
+            timeout=6
+        ).json()
+        val = r['chart']['result'][0]['meta'].get('regularMarketPrice')
+        if val is not None:
+            return float(val)
+    except Exception:
+        pass
+    try:
+        df_bond = ak.bond_zh_us_yield_em()
+        s = df_bond['美国国债收益率10年'].dropna()
+        if not s.empty:
+            return float(s.iloc[-1])
+    except Exception as e:
+        print(f"获取10年期美债收益率失败: {e}")
+    return None
+
+def fetch_yahoo_etf_pes(symbols):
+    """补充获取境外指数对应旗舰 ETF 的 TTM PE (仅作辅助参考)"""
+    etf_pe = {}
+    syms = [s for s in symbols if s]
+    if not syms:
+        return etf_pe
+    try:
+        sess = requests.Session()
+        sess.headers.update({'User-Agent': HEADERS['User-Agent']})
+        sess.get('https://fc.yahoo.com', timeout=6)
+        crumb = sess.get('https://query2.finance.yahoo.com/v1/test/getcrumb', timeout=6).text.strip()
+        if crumb and '<' not in crumb:
+            url = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={','.join(syms)}&crumb={crumb}"
+            res = sess.get(url, timeout=8).json()
+            for q in res.get('quoteResponse', {}).get('result', []):
+                if q.get('trailingPE'):
+                    etf_pe[q['symbol']] = float(q['trailingPE'])
+    except Exception as e:
+        print(f"获取Yahoo ETF PE辅助数据失败(不影响主流程): {e}")
+    return etf_pe
+
+def calc_pos_5y(series):
+    """计算最新点位在近5年(约1250个交易日)历史中的位置分位 (0~100)"""
+    s = series.dropna().tail(1250)
+    if len(s) < 2:
+        return None
+    cur = float(s.iloc[-1])
+    p_min, p_max = float(s.min()), float(s.max())
+    if p_max == p_min:
+        return 50.0
+    return (cur - p_min) / (p_max - p_min) * 100
+
+def get_global_status_emoji(pe_pct=None, pos_5y=None):
+    """根据估值分位(优先)或5年点位分位返回红绿灯标记"""
+    metric = pe_pct if pe_pct is not None else pos_5y
+    if metric is None:
+        return '⚪'
+    if metric < 30:
+        return '🟢'
+    if metric > 70:
+        return '🔴'
+    return '🟡'
+
+def generate_global_valuation_report(today):
+    """生成独立报表3：全世界主要股指估值日报 + 纳斯达克100与标普500深度估值表"""
+    session_tag = "早报" if today.hour < 12 else "收盘"
+    print("正在拉取全球主要股指行情与估值数据...")
+
+    dj_map, pe_bands = fetch_danjuan_valuations()
+    us_10y = fetch_us_10y_yield()
+
+    spot_chg_map = {}
+    try:
+        df_spot = ak.index_global_spot_em()
+        for _, row in df_spot.iterrows():
+            spot_chg_map[row['名称']] = float(row['涨跌幅'])
+    except Exception as e:
+        print(f"获取东财全球指数实时涨跌幅失败: {e}")
+
+    need_etfs = [spec[4] for spec in GLOBAL_INDICES_SPEC if spec[3] is None and spec[4]]
+    etf_pe_map = fetch_yahoo_etf_pes(need_etfs)
+
+    def fetch_item(spec):
+        label, source, code, dj_code, etf_sym = spec
+        price, chg, pos_5y, trade_date = None, None, None, ''
+        try:
+            if source == 'us_sina':
+                df = ak.index_us_daily_sina(symbol=code)
+                price = float(df['close'].iloc[-1])
+                prev = float(df['close'].iloc[-2])
+                chg = (price - prev) / prev * 100
+                pos_5y = calc_pos_5y(df['close'])
+                trade_date = str(df['date'].iloc[-1])
+            else:
+                df = ak.index_global_hist_em(symbol=code)
+                price = float(df['最新价'].iloc[-1])
+                prev = float(df['最新价'].iloc[-2])
+                chg = spot_chg_map.get(code, (price - prev) / prev * 100)
+                pos_5y = calc_pos_5y(df['最新价'])
+                trade_date = str(df['日期'].iloc[-1])
+        except Exception as e:
+            print(f"抓取全球指数 {label} ({code}) 失败: {e}")
+
+        dj = dj_map.get(dj_code) if dj_code else None
+        pe = float(dj['pe']) if dj and dj.get('pe') else etf_pe_map.get(etf_sym)
+        pe_pct = float(dj['pe_percentile']) * 100 if dj and dj.get('pe_percentile') is not None else None
+        pb = float(dj['pb']) if dj and dj.get('pb') else None
+        pb_pct = float(dj['pb_percentile']) * 100 if dj and dj.get('pb_percentile') is not None else None
+        roe = float(dj['roe']) * 100 if dj and dj.get('roe') is not None else None
+        div_yield = float(dj['yeild']) * 100 if dj and dj.get('yeild') is not None else None
+        peg = float(dj['peg']) if dj and dj.get('peg') is not None else None
+
+        return {
+            'label': label,
+            'dj_code': dj_code,
+            'price': price,
+            'chg': chg,
+            'pos_5y': pos_5y,
+            'trade_date': trade_date,
+            'pe': pe,
+            'pe_pct': pe_pct,
+            'pb': pb,
+            'pb_pct': pb_pct,
+            'roe': roe,
+            'div_yield': div_yield,
+            'peg': peg,
+            'has_index_pe': bool(dj and dj.get('pe')),
+        }
+
+    # ak.index_us_daily_sina 内部依赖 py_mini_racer (V8 引擎)，多线程并发易触发段错误，这里按序拉取即可(仅约3秒)
+    items = [fetch_item(spec) for spec in GLOBAL_INDICES_SPEC]
+
+    valid_chg = [x for x in items if x['chg'] is not None]
+    up_cnt = sum(1 for x in valid_chg if x['chg'] > 0)
+    down_cnt = sum(1 for x in valid_chg if x['chg'] < 0)
+
+    ndx = next((x for x in items if x['dj_code'] == 'NDX'), None)
+    spx = next((x for x in items if x['dj_code'] == 'SP500'), None)
+
+    # 1. 组装头部与全球市场概览
+    msg = f"<b>🌍 全球主要股指 &amp; 美股核心估值日报 ({today.strftime('%m/%d')} {session_tag})</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += "<b>🌐 【全球市场总览】</b>\n"
+    msg += f"• <b>涨跌分布</b>：监控 <b>{len(valid_chg)}</b> 个全球主要市场，<b>{up_cnt}</b> 涨 <b>{down_cnt}</b> 跌。\n"
+    if us_10y is not None:
+        msg += f"• <b>全球定价锚</b>：美国10年期国债收益率 <code>{us_10y:.2f}%</code>。\n"
+
+    # 2. 纳斯达克100 & 标普500 深度估值表
+    if ndx and spx:
+        def fmt_num(v, fmt='{:.2f}'):
+            return fmt.format(v) if v is not None else '-'
+
+        def fmt_pct(v):
+            return f'{v:.1f}%' if v is not None else '-'
+
+        def fmt_pe_band(code):
+            b = pe_bands.get(code, {})
+            if b.get('p30') and b.get('p50') and b.get('p70'):
+                return f"{round(b['p30'])}/{round(b['p50'])}/{round(b['p70'])}"
+            return '-'
+
+        def fmt_ey(pe):
+            return f"{100 / pe:.2f}%" if pe and pe > 0 else '-'
+
+        def fmt_erp(pe):
+            if pe and pe > 0 and us_10y is not None:
+                return f"{(100 / pe - us_10y):+.2f}%"
+            return '-'
+
+        us_rows = [
+            ('最新点位', fmt_num(ndx['price']), fmt_num(spx['price'])),
+            ('日涨跌幅', f"{ndx['chg']:+.2f}%" if ndx['chg'] is not None else '-', f"{spx['chg']:+.2f}%" if spx['chg'] is not None else '-'),
+            ('五年点位', fmt_pct(ndx['pos_5y']), fmt_pct(spx['pos_5y'])),
+            ('市盈率PE', fmt_num(ndx['pe']), fmt_num(spx['pe'])),
+            ('PE历史分位', fmt_pct(ndx['pe_pct']), fmt_pct(spx['pe_pct'])),
+            ('PE30/50/70', fmt_pe_band('NDX'), fmt_pe_band('SP500')),
+            ('市净率PB', fmt_num(ndx['pb']), fmt_num(spx['pb'])),
+            ('PB历史分位', fmt_pct(ndx['pb_pct']), fmt_pct(spx['pb_pct'])),
+            ('ROE回报率', f"{ndx['roe']:.1f}%" if ndx['roe'] is not None else '-', f"{spx['roe']:.1f}%" if spx['roe'] is not None else '-'),
+            ('股息率', f"{ndx['div_yield']:.2f}%" if ndx['div_yield'] is not None else '-', f"{spx['div_yield']:.2f}%" if spx['div_yield'] is not None else '-'),
+            ('PEG估值', fmt_num(ndx['peg']), fmt_num(spx['peg'])),
+            ('盈利收益率', fmt_ey(ndx['pe']), fmt_ey(spx['pe'])),
+            ('风险溢价ERP', fmt_erp(ndx['pe']), fmt_erp(spx['pe'])),
+        ]
+
+        msg += "\n<b>🇺🇸 【纳指100 &amp; 标普500 估值对比表】</b>\n"
+        msg += "<pre>\n"
+        msg += f"{pad_to('核心指标', 12)} {pad_to('纳指100', 10, 'right')} {pad_to('标普500', 10, 'right')}\n"
+        msg += "-" * 34 + "\n"
+        for k, v1, v2 in us_rows:
+            msg += f"{pad_to(k, 12)} {pad_to(v1, 10, 'right')} {pad_to(v2, 10, 'right')}\n"
+        msg += "</pre>\n"
+
+        # 美股估值简评
+        def eva_label(pct):
+            if pct is None: return '暂无'
+            if pct < 30: return '🟢 偏低估'
+            if pct > 70: return '🔴 偏高估'
+            return '🟡 适中'
+
+        msg += (
+            f"• <b>纳指100</b>：PE <code>{fmt_num(ndx['pe'])}</code> (10年分位 <code>{fmt_pct(ndx['pe_pct'])}</code>，{eva_label(ndx['pe_pct'])})\n"
+            f"• <b>标普500</b>：PE <code>{fmt_num(spx['pe'])}</code> (10年分位 <code>{fmt_pct(spx['pe_pct'])}</code>，{eva_label(spx['pe_pct'])})\n"
+        )
+
+    # 3. 全世界主要股指估值表
+    msg += "\n<b>📊 【全世界主要股指估值速览表】</b>\n"
+    msg += "<pre>\n"
+    msg += f"{pad_to('全球指数', 9)} {pad_to('涨跌', 7, 'right')} {pad_to('PE', 5, 'right')} 分位/状态\n"
+    msg += "-" * 35 + "\n"
+    for x in items:
+        chg_s = f"{x['chg']:+.2f}%" if x['chg'] is not None else '-'
+        pe_s = f"{x['pe']:.1f}" if x['pe'] is not None else '-'
+        emoji = get_global_status_emoji(x['pe_pct'], x['pos_5y'])
+        if x['pe_pct'] is not None:
+            stat_s = f"PE{x['pe_pct']:>2.0f}% {emoji}"
+        elif x['pos_5y'] is not None:
+            stat_s = f"位{x['pos_5y']:>2.0f}% {emoji}"
+        else:
+            stat_s = f" -   {emoji}"
+        msg += f"{pad_to(x['label'], 9)} {pad_to(chg_s, 7, 'right')} {pad_to(pe_s, 5, 'right')} {stat_s}\n"
+    msg += "</pre>\n"
+
+    msg += (
+        "\n<i>注：1) 纳指100/标普500/德国DAX/印度/恒生/沪深300 的PE与分位采自蛋卷近10年指数估值口径；"
+        "其余市场展示5年点位分位，PE参考其海外旗舰ETF口径。\n"
+        "2) 🟢代表分位&lt;30%偏低，🟡为30%~70%适中，🔴为&gt;70%偏高；ERP = 盈利收益率(1/PE) - 10年期美债收益率。</i>"
+    )
+    return msg
+
 # ==================== Telegram 发送辅助 ====================
 
 def send_telegram_message(text):
@@ -635,16 +916,25 @@ def main():
     except Exception as e:
         print(f"生成或发送韭圈儿指数估值日报失败: {e}")
 
-    # 3. 新增功能：单独发送纳斯达克100 QDII 场外基金监控日报 (排除C类，表格化展示)
+    # 3. 单独发送纳斯达克100 QDII 场外基金监控日报 (排除C类，表格化展示)
     print("\n=== 开始生成纳斯达克100 QDII 场外基金日报 ===")
     try:
         qdii_funds = fetch_qdii_nasdaq_funds(cache_file='qdii_cache.json')
         qdii_report = build_qdii_report(qdii_funds, today, cache_file='qdii_cache.json')
         print("正在推送纳斯达克100 QDII 日报至 Telegram (单独发送)...")
         send_telegram_message(qdii_report)
-        print("=== 所有任务执行完毕 ===")
     except Exception as e:
         print(f"生成或发送纳斯达克100 QDII 日报失败: {e}")
+
+    # 4. 新增独立功能：全球主要股指 & 纳指100/标普500 估值日报 (独立第3条发送)
+    print("\n=== 开始生成全球主要股指 & 纳指100/标普500 估值日报 ===")
+    try:
+        global_report = generate_global_valuation_report(today)
+        print("正在推送全球主要股指估值日报至 Telegram (单独发送)...")
+        send_telegram_message(global_report)
+        print("=== 所有任务执行完毕 ===")
+    except Exception as e:
+        print(f"生成或发送全球主要股指估值日报失败: {e}")
 
 if __name__ == "__main__":
     main()
