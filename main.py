@@ -59,9 +59,11 @@ def fetch_single_index(name, code):
     """抓取单只指数行情数据并计算3年历史分位"""
     try:
         if code == 'HSTECH':
-            df = ak.stock_hk_index_daily_sina(symbol='HSTECH')
+            fetch_hk = getattr(ak, 'index_hk_daily_sina', None) or getattr(ak, 'stock_hk_index_daily_sina')
+            df = fetch_hk(symbol='HSTECH')
         else:
-            df = ak.stock_zh_index_daily(symbol=code)
+            fetch_zh = getattr(ak, 'index_zh_daily_sina', None) or getattr(ak, 'stock_zh_index_daily')
+            df = fetch_zh(symbol=code)
         
         current_price = df['close'].iloc[-1]
         df_3y = df.tail(750)
@@ -79,6 +81,7 @@ def fetch_single_index(name, code):
             'status': get_valuation_status(pos)
         }
     except Exception as e:
+        print(f"抓取指数 {name} ({code}) 失败: {e}")
         return None
 
 def create_valuation_summary(items):
