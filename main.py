@@ -3,6 +3,7 @@ import os
 import re
 import json
 import io
+import html
 import time
 from datetime import datetime, timedelta, timezone
 import concurrent.futures
@@ -856,6 +857,221 @@ def generate_global_valuation_report(today):
     )
     return msg
 
+# ==================== 新增功能 3：国内外主要政治经济金融新闻日报 ====================
+
+NEWS_NOISE_RE = re.compile(
+    r'见闻历|会员|课程|优惠|点击|风险提示|快评|专题片|今晚播出|致信祝贺|复信|贺电|友谊|文艺|联欢|天气预报|神历|文化情缘|的来信|结束出访|回到北京|抵达.*出席|宣讲团'
+)
+DOMESTIC_POLICY_RE = re.compile(
+    r'习近平|李强|国务院|发改委|央行|人民银行|证监会|财政部|商务部|工信部|外交部|国资委|全会|考察|会晤|战略对话|实施意见|实施方案|中央|两会|政策|降准|降息|财政|稳增长|地方债|房地产'
+)
+INTL_MACRO_RE = re.compile(
+    r'美联储|鲍威尔|美债|强美元|弱美元|美元指数|美元流动性|欧央行|日本央行|英国央行|关税|贸易|特朗普|白宫|国会|美国|俄乌|中东|伊朗|以色列|欧盟|日本|韩国|印度|中俄|中美|中加|APEC|G20|GDP|CPI|PPI|非农|失业率|利率|地缘|国防|出口|通胀|经济财金|峰会'
+)
+
+def _clean_news_text(text, max_len=85):
+    """清理新闻文本中的冗余前缀与空白，并安全裁剪长度"""
+    t = re.sub(r'\s+', ' ', str(text or '')).strip()
+    t = re.sub(r'^【.*?】\s*', '', t)
+    t = re.sub(r'^(?:财联社|新华网|央视新闻|中新网)\d{1,2}月\d{1,2}日电[，,]\s*', '', t)
+    if len(t) > max_len:
+        t = t[:max_len - 1] + '…'
+    return t
+
+def _is_similar(clean, seen_texts):
+    """检查核心实体/前导短语重合，避免同一新闻跨源重复"""
+    norm = re.sub(r'[^\w\u4e00-\u9fff]', '', clean)
+    prefix = norm[:10]
+    for prev in seen_texts:
+        if prefix and prefix in prev:
+            return True
+        # 检查核心长关键词重合 (如 159952 / 中俄美元首 / 创业板ETF)
+        tokens = re.findall(r'[A-Za-z0-9]{4,}|[\u4e00-\u9fff]{5,}', clean)
+        for tok in tokens:
+            if tok in prev:
+                return True
+    return False
+
+def _dedup_append(bucket, text, seen_texts, limit):
+    """去重与降噪添加条目"""
+    if len(bucket) >= limit:
+        return
+    clean = _clean_news_text(text)
+    if not clean or len(clean) < 10 or NEWS_NOISE_RE.search(clean):
+        return
+    norm = re.sub(r'[^\w\u4e00-\u9fff]', '', clean)
+    if not norm or _is_similar(clean, seen_texts):
+        return
+    seen_texts.append(norm)
+    bucket.append(clean)
+
+def fetch_cctv_headlines(today):
+    """拉取最新一期《新闻联播》核心政经与外交要闻"""
+    for delta in [0, 1, 2, 3]:
+        d_str = (today - timedelta(days=delta)).strftime('%Y%m%d')
+        try:
+            df = ak.alternative_news_cctv(date=d_str)
+            if df is not None and not df.empty:
+                return d_str, [str(t) for t in df['title'].tolist() if t]
+        except Exception:
+            continue
+    return None, []
+
+def fetch_cjzc_sections():
+    """拉取东方财富《财经早餐》每日精选与环球市场要闻"""
+    sections = {'每日精选': [], '环球市场': []}
+    try:
+        df = ak.stock_news_cjzc_em()
+        if df is None or df.empty:
+            return sections
+        url = df.iloc[0]['链接']
+        res = requests.get(url, headers={'User-Agent': HEADERS['User-Agent']}, timeout=8)
+        soup = bs4.BeautifulSoup(res.content.decode('utf-8', errors='ignore'), 'html.parser')
+        body = soup.find('div', id='ContentBody') or soup.find('div', class_='txtinfos')
+        if not body:
+            return sections
+
+        cur_sec = ''
+        buf_title = ''
+        for el in body.find_all(['h3', 'p']):
+            if el.name == 'h3':
+                cur_sec = el.get_text(strip=True)
+                buf_title = ''
+            elif el.name == 'p' and cur_sec in sections:
+                txt = re.sub(r'\s+', ' ', el.get_text(strip=True))
+                if not txt or '点击' in txt or '风险提示' in txt:
+                    continue
+                if txt.endswith(('：', ':')) and len(txt) < 35:
+                    buf_title = txt.rstrip('：:')
+                else:
+                    merged = f"{buf_title}：{txt}" if buf_title else txt
+                    sections[cur_sec].append(merged)
+                    buf_title = ''
+    except Exception as e:
+        print(f"抓取东方财富财经早餐失败: {e}")
+    return sections
+
+def fetch_wscn_global_news():
+    """拉取华尔街见闻全球频道头条与重要快讯"""
+    articles, lives = [], []
+    headers = {'User-Agent': HEADERS['User-Agent']}
+    try:
+        r1 = requests.get(
+            'https://api-one.wallstcn.com/apiv1/content/fabricate-articles?channel=global&limit=25',
+            headers=headers, timeout=8
+        ).json()
+        for it in r1.get('data', {}).get('items', []):
+            res_obj = it.get('resource') or {}
+            title = it.get('title') or res_obj.get('title', '')
+            if title:
+                articles.append(title)
+    except Exception as e:
+        print(f"抓取华尔街见闻全球头条失败: {e}")
+
+    try:
+        r2 = requests.get(
+            'https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=40',
+            headers=headers, timeout=8
+        ).json()
+        for it in r2.get('data', {}).get('items', []):
+            score = it.get('score', 1)
+            txt = (it.get('title') or it.get('content_text') or '').strip()
+            if txt and (score >= 2 or INTL_MACRO_RE.search(txt)):
+                lives.append((score, txt))
+    except Exception as e:
+        print(f"抓取华尔街见闻全球快讯失败: {e}")
+    return articles, lives
+
+def generate_macro_news_report(today):
+    """生成独立报表4：国内外主要政治、经济与金融新闻日报"""
+    session_tag = "早报" if today.hour < 12 else "收盘"
+    print("正在汇聚国内外时政、宏观经济与金融要闻...")
+
+    cctv_date, cctv_titles = fetch_cctv_headlines(today)
+    cjzc_sections = fetch_cjzc_sections()
+    wscn_articles, wscn_lives = fetch_wscn_global_news()
+
+    cls_items = []
+    try:
+        df_cls = ak.stock_news_global_cls(symbol='重点')
+        if df_cls is not None and not df_cls.empty:
+            cls_items = [str(r['标题'] or r['内容']) for _, r in df_cls.iterrows()]
+    except Exception as e:
+        print(f"获取财联社重点快讯失败: {e}")
+
+    domestic_news = []
+    intl_news = []
+    market_news = []
+    seen = []
+
+    # 1. 国内时政与宏观政策 (财经早餐部委/监管政策 + 最多2条新闻联播核心高层动态)
+    for item in cjzc_sections.get('每日精选', []):
+        if DOMESTIC_POLICY_RE.search(item) and not any(k in item for k in ['会晤', '外交']):
+            _dedup_append(domestic_news, item, seen, 3)
+    for t in cctv_titles:
+        if DOMESTIC_POLICY_RE.search(t) and not any(k in t for k in ['会晤', '美国', '俄罗斯', '东盟']):
+            _dedup_append(domestic_news, t, seen, 5)
+    for item in cjzc_sections.get('每日精选', []):
+        if DOMESTIC_POLICY_RE.search(item):
+            _dedup_append(domestic_news, item, seen, 5)
+
+    # 2. 国际政经、央行与地缘要闻
+    for t in wscn_articles:
+        if INTL_MACRO_RE.search(t):
+            _dedup_append(intl_news, t, seen, 4)
+    for _, txt in sorted(wscn_lives, key=lambda x: -x[0]):
+        if not txt.startswith('提醒：') and INTL_MACRO_RE.search(txt):
+            _dedup_append(intl_news, txt, seen, 5)
+    for t in cctv_titles:
+        if any(k in t for k in ['会晤', '美国', '俄罗斯', '东盟', 'APEC']):
+            _dedup_append(intl_news, t, seen, 6)
+    for item in cjzc_sections.get('每日精选', []) + cjzc_sections.get('环球市场', []):
+        if any(k in item for k in ['外交部', '会晤', '特朗普', '美联储', '关税', '美国', '伊朗']):
+            _dedup_append(intl_news, item, seen, 6)
+
+    # 3. 全球金融市场与产业焦点 (排除纯时政/外交通稿)
+    POLITICS_SKIP = ('习近平', '李强', '外交部', '全会', '考察', '会见')
+    for t in cls_items:
+        if not any(k in t for k in POLITICS_SKIP):
+            _dedup_append(market_news, t, seen, 6)
+    for _, txt in sorted(wscn_lives, key=lambda x: -x[0]):
+        if not txt.startswith('提醒：') and not any(k in txt for k in POLITICS_SKIP):
+            _dedup_append(market_news, txt, seen, 6)
+    for t in wscn_articles:
+        if not any(k in t for k in POLITICS_SKIP):
+            _dedup_append(market_news, t, seen, 6)
+    for item in cjzc_sections.get('环球市场', []) + cjzc_sections.get('每日精选', []):
+        if not any(k in item for k in POLITICS_SKIP):
+            _dedup_append(market_news, item, seen, 6)
+
+    msg = f"<b>📰 国内外政经与金融要闻日报 ({today.strftime('%m/%d')} {session_tag})</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    msg += "<b>🇨🇳 【国内时政与宏观政策】</b>\n"
+    if domestic_news:
+        for item in domestic_news:
+            msg += f"• {html.escape(item, quote=False)}\n"
+    else:
+        msg += "• 暂无最新国内核心政务要闻。\n"
+
+    msg += "\n<b>🌍 【国际政经与地缘动态】</b>\n"
+    if intl_news:
+        for item in intl_news:
+            msg += f"• {html.escape(item, quote=False)}\n"
+    else:
+        msg += "• 暂无最新国际政经突发动态。\n"
+
+    msg += "\n<b>💹 【全球金融市场与产业焦点】</b>\n"
+    if market_news:
+        for item in market_news:
+            msg += f"• {html.escape(item, quote=False)}\n"
+    else:
+        msg += "• 暂无最新金融市场焦点。\n"
+
+    cctv_tag = f"新闻联播({cctv_date[4:6]}/{cctv_date[6:]})" if cctv_date else "新闻联播"
+    msg += f"\n<i>注：精选汇聚自{cctv_tag}、东方财富财经早餐、华尔街见闻全球频道及财联社重点快讯，已自动去重与降噪。</i>"
+    return msg
+
 # ==================== Telegram 发送辅助 ====================
 
 def send_telegram_message(text):
@@ -926,15 +1142,24 @@ def main():
     except Exception as e:
         print(f"生成或发送纳斯达克100 QDII 日报失败: {e}")
 
-    # 4. 新增独立功能：全球主要股指 & 纳指100/标普500 估值日报 (独立第3条发送)
+    # 4. 独立第3条发送：全球主要股指 & 纳指100/标普500 估值日报
     print("\n=== 开始生成全球主要股指 & 纳指100/标普500 估值日报 ===")
     try:
         global_report = generate_global_valuation_report(today)
         print("正在推送全球主要股指估值日报至 Telegram (单独发送)...")
         send_telegram_message(global_report)
-        print("=== 所有任务执行完毕 ===")
     except Exception as e:
         print(f"生成或发送全球主要股指估值日报失败: {e}")
+
+    # 5. 新增独立第4条发送：国内外主要政治经济金融要闻日报
+    print("\n=== 开始生成国内外政经与金融要闻日报 ===")
+    try:
+        news_report = generate_macro_news_report(today)
+        print("正在推送国内外政经与金融要闻日报至 Telegram (单独发送)...")
+        send_telegram_message(news_report)
+        print("=== 所有任务执行完毕 ===")
+    except Exception as e:
+        print(f"生成或发送国内外政经与金融要闻日报失败: {e}")
 
 if __name__ == "__main__":
     main()
